@@ -5,10 +5,6 @@
  */
 
 import {
-  getEnv,
-  assertDataSource,
-} from '@cubejs-backend/shared';
-import {
   BaseDriver,
   DownloadQueryResultsOptions,
   DownloadQueryResultsResult,
@@ -146,12 +142,46 @@ export class KustoDriver extends BaseDriver {
 
   public async testConnection() {
     // Simple query to test connection
-    await this.query('show databases');
+    await this.query<KustoData.KustoResultRow>('print 1');
   }
 
   public async query<R = unknown>(query: string, values: unknown[] = []): Promise<Array<R>> {
-    // Kusto does not use parameterized queries in the same way; values are ignored
-    const results = await this.client.execute(this.config.database!, query);
+    // Create a new ClientRequestProperties object
+    const crp = new KustoData.ClientRequestProperties();
+    // If values are provided, process them based on format
+    if (values && values.length > 0) {
+      // Handle positional parameters (? placeholders)
+      let paramIndex = 0;
+      query = query.replace(/\?/g, (match) => {
+        if (paramIndex < values.length) {
+          const value = values[paramIndex++];
+          // Handle different value types
+          if (value === null || value === undefined) {
+            return 'null';
+          } else if (typeof value === 'string') {
+            // Escape single quotes for string values
+            return `'${value.replace(/'/g, '\'\'')}'`;
+          } else if (typeof value === 'number') {
+            return value.toString();
+          } else if (typeof value === 'boolean') {
+            return value ? 'true' : 'false';
+          } else if (value instanceof Date) {
+            // Format date as ISO string for Kusto
+            return `datetime('${value.toISOString()}')`;
+          } else {
+            // For objects or arrays, stringify and quote
+            return `'${JSON.stringify(value).replace(/'/g, '\'\'')}'`;
+          }
+        }
+        return match; // If we run out of values, leave the ? as is
+      });
+    }
+
+    // Execute the query with the parameters
+    const results = query.trimStart().startsWith('.')
+      ? await this.client.executeMgmt(this.config.database!, query, crp)
+      : await this.client.executeQuery(this.config.database!, query, crp);
+
     let rows: R[] = [];
     if (results.primaryResults && results.primaryResults[0]) {
       rows = Array.from(results.primaryResults[0].rows()) as R[];
@@ -162,14 +192,48 @@ export class KustoDriver extends BaseDriver {
   public informationSchemaQuery() {
     // Kusto equivalent for listing columns
     return `
-      .show tables
-      | project table_name = Name
-      | join kind=inner (
-          .show table * schema
-          | project table_name = TableName, column_name = ColumnName, data_type = ColumnType
-        ) on table_name
-      | project table_name, column_name, data_type
-    `;
+      .show database schema
+        | where isnotempty(ColumnName)
+        | project
+            table_name=TableName,
+            column_name=ColumnName,
+            data_type = case(
+                      // strings
+                      ColumnType == "System.String",
+                      "text",
+                      ColumnType == "System.Guid",
+                      "text",
+                      ColumnType == "System.Object",
+                      "text",
+                      // dates
+                      ColumnType == "System.DateTime",
+                      "timestamp",
+                      // decimals
+                      ColumnType == "System.Decimal",
+                      "decimal",
+                      // floats
+                      ColumnType in ("System.Double", "System.Single"),
+                      "double",
+                      // signed integers
+                      ColumnType == "System.SByte",
+                      "int",     // int8
+                      ColumnType == "System.Int16",
+                      "int",     // int16
+                      ColumnType == "System.Int32",
+                      "int",     // int32
+                      ColumnType == "System.Int64",
+                      "bigint",  // int64
+                      // unsigned integers
+                      ColumnType in ("System.UInt16", "System.UInt32"),
+                      "int",
+                      ColumnType == "System.UInt64",
+                      "bigint",
+                      // booleans
+                      ColumnType == "System.Boolean",
+                      "int",  // often mapped to 0/1
+                      // everything else
+                      "text")
+                `;
   }
 
   public async createSchemaIfNotExists(schemaName: string): Promise<void> {
@@ -179,7 +243,7 @@ export class KustoDriver extends BaseDriver {
 
   public async getTablesQuery(schemaName: string) {
     // Kusto does not have schemas, so ignore schemaName
-    return this.query<TableQueryResult>('.show tables');
+    return this.query<TableQueryResult>('.show tables | project table_name = TableName');
   }
 
   public async downloadQueryResults(query: string, values: unknown[], _options: DownloadQueryResultsOptions): Promise<DownloadQueryResultsResult> {
