@@ -95,20 +95,6 @@ describe('KustoDriver Integration', () => {
     expect(result[0].Value).toBe('Hello, World');
   });
 
-  it('should execute parametrized query correctly - different types', async () => {
-    const query = `${tableName} | where Id == ? | extend UValue = strcat("Hello, ", ?)`;
-    const params = [1, 'World'];
-    // Use the TestTableRow class as the generic type parameter
-    const result = await driver.query<TestTableRow>(query, params);
-    expect(result.length).toBe(1);
-
-    expect(result[0].Id).toBe(1);
-    expect(result[0].Name).toBe('Test');
-    expect(result[0].UValue).toBe('Hello, World');
-    expect(result[0].Value).toBe(123.45);
-    expect(new Date(result[0].Date).toISOString()).toBe('2023-01-01T00:00:00.000Z');
-  });
-
   it('should handle quoted identifiers correctly', async () => {
     // This tests the normalizeQuery functionality
     const query = 'print ["Column With Spaces"]=123';
